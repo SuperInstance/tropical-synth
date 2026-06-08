@@ -1,0 +1,11 @@
+[package]
+name = "tropical-synth"
+version = "0.1.0"
+edition = "2021"
+description = "Sound design via tropical geometry — draw a tropical curve, hear the sound"
+license = "MIT"
+repository = "https://github.com/SuperInstance/tropical-synth"
+keywords = ["tropical", "synth", "music", "geometry", "sound-design"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
