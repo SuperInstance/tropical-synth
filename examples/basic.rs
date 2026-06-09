@@ -1,51 +1,35 @@
-use tropical_synth::{Tropical, TropicalMonomial, TropicalPolynomial, TimbreSpace, MidiCCMapper};
+//! Basic tropical-synth usage: create a polynomial, build a timbre space.
+//!
+//! Run with: cargo run --example basic
+
+use tropical_synth::{Tropical, TropicalPolynomial, TropicalMonomial, SynthPatch};
 
 fn main() {
-    // Build a tropical polynomial in two variables:
-    //   p(x, y) = max(0 + 2x, 1 + 2y, 3 + x + y)
-    // This defines a piecewise-linear surface with three "sectors".
+    // The tropical semiring
+    let a = Tropical(3.0);
+    let b = Tropical(5.0);
+    println!("Tropical arithmetic:");
+    println!("  {} ⊕ {} = {} (max)", a.0, b.0, (a + b).0);
+    println!("  {} ⊗ {} = {} (add)", a.0, b.0, (a * b).0);
+    println!("  {}^4 = {} (scalar mul)", a.0, a.pow(4).0);
+
+    // A simple tropical polynomial: max(2x, 2y, 3+x+y)
     let poly = TropicalPolynomial::new(vec![
-        TropicalMonomial::new(0.0, vec![2, 0]), // 2x
-        TropicalMonomial::new(1.0, vec![0, 2]), // 1 + 2y
-        TropicalMonomial::new(3.0, vec![1, 1]), // 3 + x + y
+        TropicalMonomial::new(0.0, vec![2, 0]),
+        TropicalMonomial::new(0.0, vec![0, 2]),
+        TropicalMonomial::new(3.0, vec![1, 1]),
     ]);
 
-    // Evaluate at a point in parameter space
     let val = poly.evaluate(&[1.0, 2.0]).unwrap();
-    println!("p(1, 2) = {} (max of 2, 5, 6 = 6)", val);
+    println!("\nPolynomial at (1, 2): {:.1}", val);
 
-    // Find which monomial is active (dominates) at this point
-    let active = poly.active_monomial(&[1.0, 2.0]).unwrap();
-    println!("Active monomial index: {} (the 3+x+y term)", active);
+    let active = poly.active_monomial(&[10.0, 0.0]).unwrap();
+    println!("Active monomial at (10, 0): #{}", active);
 
-    // Build a timbre space — each vertex of the Newton polytope becomes a synth patch
-    let space = TimbreSpace::new(poly).unwrap();
-    println!("Timbre space has {} patches", space.len());
-
-    for (i, patch) in space.patches().iter().enumerate() {
-        println!(
-            "  Patch {}: osc={}, cutoff={:.0}Hz, attack={:.3}s",
-            i,
-            patch.oscillators.len(),
-            patch.filter.cutoff_hz,
-            patch.envelope.attack_s,
-        );
-    }
-
-    // Find the active patch at a point
-    let active_patch = space.active_patch(&[1.0, 2.0]).unwrap();
-    println!("\nActive patch at (1,2): cutoff={:.0}Hz", active_patch.filter.cutoff_hz);
-
-    // Morph between two patches
-    let morph = space.morph(0, 1).unwrap();
-    let mid = morph.sample(4);
-    println!("Morph from patch 0 to 1 at t=0.5: cutoff={:.0}Hz", mid[2].filter.cutoff_hz);
-
-    // Map a patch to MIDI CC messages
-    let mapper = MidiCCMapper::new(0);
-    let msgs = mapper.map_patch(space.patch(0).unwrap()).unwrap();
-    println!("\nMIDI CC messages for patch 0:");
-    for m in &msgs {
-        println!("  CC{} = {}", m.cc, m.value);
-    }
+    // A synth patch from a tropical vertex
+    let patch = SynthPatch::from_vertex(&[2, 1], 1.5);
+    println!("\nPatch from vertex [2,1], c=1.5:");
+    println!("  Oscillators: {}", patch.oscillators.len());
+    println!("  Waveform: {:?}", patch.oscillators[0].waveform);
+    println!("  Cutoff: {:.0} Hz", patch.filter.cutoff_hz);
 }

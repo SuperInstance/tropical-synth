@@ -1,118 +1,271 @@
 # tropical-synth
 
-[![crates.io](https://img.shields.io/crates/v/tropical-synth.svg)](https://crates.io/crates/tropical-synth)
-[![docs.rs](https://docs.rs/tropical-synth/badge.svg)](https://docs.rs/tropical-synth)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+**Sound design via tropical geometry — draw a tropical curve, hear the sound.**
 
-## The Idea
+## The Problem
 
-In the tropical semiring, addition is `max` and multiplication is `+`. This isn't just notation — it fundamentally changes what a polynomial looks like. A tropical polynomial like:
+Synthesizer patch design is an art form. You twiddle knobs until something sounds right, but there's no mathematical framework that tells you *why* a patch works or *how* to smoothly morph between two patches. The space of possible sounds is vast and unstructured.
+
+## The Key Insight
+
+**Tropical geometry replaces addition with max and multiplication with addition.** This simple change turns smooth algebraic curves into piecewise-linear ones with sharp corners and edges. And those corners and edges map perfectly to synthesizer parameters:
+
+- Each **vertex** of a tropical polynomial → a distinct synth patch
+- Each **edge** between vertices → a smooth morphing path between patches
+- The **Newton polytope** (the convex hull of exponent vectors) → the entire timbre space
+
+The "aha moment" is that **tropical polynomials are the same as ReLU neural networks**. A tropical polynomial max(c₁ + a₁·x, c₂ + a₂·x, ...) is exactly a single-layer ReLU network with specific weight constraints. This means:
+- Sound design = network architecture design
+- Patch morphing = interpolation along tropical edges
+- Timbre space = Newton polytope of the tropical polynomial
+
+This crate implements:
+- The **tropical semiring** (max-plus algebra) with proper `Add` and `Mul` operators
+- **Tropical polynomials** with evaluation and active-region classification
+- **Newton polytopes** (vertices as synth patches)
+- **SynthPatch** — full synthesizer parameters derived from tropical vertices
+- **MorphPath** — linear interpolation between patches along tropical edges
+- **TimbreSpace** — the complete navigable sound-design space
+- **MIDI CC mapping** — convert any patch to standard MIDI control messages
+
+## Architecture
 
 ```
-max(2x + 1, 3y, x + y + 4)
+    ┌──────────────────────────────────────────────┐
+    │            TimbreSpace                        │
+    │ (polynomial → patches → morph paths)          │
+    └───────────────┬──────────────────────────────┘
+                    │
+    ┌───────────────▼──────────────────────────────┐
+    │          TropicalPolynomial                   │
+    │ (max of tropical monomials)                   │
+    │ evaluate(), active_monomial(), classify_grid()│
+    └───────────────┬──────────────────────────────┘
+                    │
+         ┌──────────┴──────────┐
+         │                     │
+┌────────▼────────┐  ┌────────▼────────┐
+│ Tropical        │  │ Newton          │
+│ Monomial        │  │ Polytope        │
+│ (c ⊗ x₁^a₁ ⊗ …)│  │ (vertices =     │
+│                 │  │  patches)       │
+└─────────────────┘  └────────┬────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │ SynthPatch        │
+                    │ (oscillators,     │
+                    │  filter, envelope,│
+                    │  effects)         │
+                    └─────────┬─────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+     ┌────────▼──────┐ ┌─────▼──────┐ ┌──────▼──────┐
+     │  MorphPath    │ │  MIDI CC   │ │  Patch      │
+     │  (lerp at t)  │ │  Mapper    │ │  from_vertex│
+     └───────────────┘ └────────────┘ └─────────────┘
 ```
 
-is a **piecewise-linear surface** whose "corners" form a convex polytope (the Newton polytope). These corners are where the active term changes — where two monomials are equal.
+### Module Overview
 
-Here's the insight for sound design: **that piecewise-linear surface is a natural synthesizer parameter space.** Each vertex of the Newton polytope is a distinct patch. Each edge is a morphing path. Navigate the surface and you traverse every possible sound the polynomial can produce, with guaranteed smooth transitions.
+| Module | Purpose |
+|--------|---------|
+| `semiring` | The tropical semiring: `Tropical(f64)` with max-plus algebra |
+| `polynomial` | Tropical monomials, polynomials, Newton polytopes |
+| `patch` | SynthPatch with oscillators, filter, envelope, effects |
+| `morph` | MorphPath — linear interpolation between patches |
+| `timbre` | TimbreSpace — the full navigable sound space |
+| `midi` | MIDI CC mapping from patches to control messages |
+| `error` | Error types |
 
-## Why This Works
+## The Math: Tropical Geometry
 
-Standard synthesizer parameter spaces are arbitrary — 128 knobs with no geometric structure. You twist knobs and hope. Tropical geometry gives you a parameter space with **intrinsic geometry**: nearby points sound similar because they share active monomials, and the boundaries between regions are exactly where the character changes.
+### The Tropical Semiring (ℝ ∪ {−∞}, max, +)
 
-The max-plus semiring also has a deep connection to neural networks: a tropical rational function `max(f₁,...,fₙ) - max(g₁,...,gₘ)` is mathematically equivalent to a two-layer ReLU network. So tropical-synth isn't just a quirky math trick — it's exploring the same parameter space as deep learning, but with the algebra fully exposed.
-
-## How To Use It
-
-Build a tropical polynomial from monomials, then extract the timbre space:
+| Operation | Standard | Tropical |
+|-----------|----------|----------|
+| Addition (⊕) | a + b | max(a, b) |
+| Multiplication (⊗) | a × b | a + b |
+| Zero (additive identity) | 0 | −∞ |
+| One (multiplicative identity) | 1 | 0 |
+| Power: xⁿ | x × x × ... × x | x + x + ... + x = n·x |
 
 ```rust
-use tropical_synth::{TropicalPolynomial, TropicalMonomial, TimbreSpace};
+use tropical_synth::Tropical;
 
-// Each monomial: coefficient + exponents
-// This defines a 2D parameter space with 3 regions
+let a = Tropical(3.0);
+let b = Tropical(5.0);
+
+// Tropical addition = max
+assert_eq!(a + b, Tropical(5.0));
+
+// Tropical multiplication = addition
+assert_eq!(a * b, Tropical(8.0));
+
+// Identities
+assert_eq!(Tropical::ZERO + a, a);  // -∞ ⊕ a = a
+assert_eq!(Tropical::ONE * a, a);   // 0 ⊗ a = a
+
+// Power = scalar multiplication
+assert_eq!(Tropical(3.0).pow(4), Tropical(12.0));
+```
+
+### Tropical Polynomials
+
+A tropical polynomial is the max of tropical monomials:
+
+```
+p(x) = max(c₁ + a₁·x₁ + b₁·x₂, c₂ + a₂·x₁ + b₂·x₂, ...)
+```
+
+Each monomial is a hyperplane in the input space. The polynomial's graph is a **piecewise-linear convex function** whose "corners" are where the active monomial changes.
+
+```rust
+use tropical_synth::{TropicalPolynomial, TropicalMonomial};
+
 let poly = TropicalPolynomial::new(vec![
-    TropicalMonomial::new(0.0, vec![2, 0]),   // region 1: bright
-    TropicalMonomial::new(1.0, vec![0, 2]),   // region 2: warm  
-    TropicalMonomial::new(3.0, vec![1, 1]),   // region 3: balanced
+    TropicalMonomial::new(0.0, vec![2, 0]),  // 2x₁
+    TropicalMonomial::new(0.0, vec![0, 2]),  // 2x₂
+    TropicalMonomial::new(3.0, vec![1, 1]),  // 3 + x₁ + x₂
 ]);
 
-// The Newton polytope tells you where the vertices are
-let newton = poly.newton_polytope();
-println!("{} vertices = {} distinct patches", newton.vertices.len(), newton.vertices.len());
+// Evaluate at a point
+let val = poly.evaluate(&[1.0, 2.0]).unwrap();
+// max(2·1, 2·2, 3+1+2) = max(2, 4, 6) = 6
 
-// Build the navigable timbre space
-let space = TimbreSpace::from_polynomial(&poly);
-
-// Query any point in parameter space → get a synthesizer patch
-let patch = space.patch_at(&[0.5, 0.5]);
-println!("Oscillator: {:?}", patch.oscillator.waveform);
-println!("Filter cutoff: {:.1} Hz", patch.filter.cutoff);
+// Which monomial is active?
+let idx = poly.active_monomial(&[10.0, 0.0]).unwrap();
+// At (10, 0): 2·10=20 wins → monomial 0
 ```
 
-## SynthPatch Structure
+### Newton Polytopes
 
-Each vertex of the Newton polytope maps to a full synthesizer voice:
+The **Newton polytope** of a tropical polynomial is the convex hull of the exponent vectors. Each vertex of this polytope corresponds to a monomial, and in this crate, to a **synth patch**.
+
+The edges of the Newton polytope are the **morph paths** — smooth transitions between patches where one monomial hands off to another.
+
+### The Connection to ReLU Networks
+
+A tropical polynomial `max(c₁ + a₁·x, ..., cₙ + aₙ·x)` is exactly a single-layer ReLU network:
 
 ```
-SynthPatch
-├── oscillator: waveform (Sine/Saw/Square/Triangle/Noise), detune, pulse_width
-├── filter: type (LowPass/HighPass/BandPass/Notch), cutoff, resonance
-├── envelope: attack, decay, sustain, release
-└── effects: kind (Reverb/Delay/Chorus/Distortion), mix, parameter
+y = max_i (cᵢ + aᵢ · x) = max(W·x + b)
 ```
 
-The mapping from tropical coordinates to synth parameters uses the monomial exponents as dimensional weights and the coefficient as an offset. Higher-dimensional polynomials give more nuanced parameter spaces.
+This means:
+- Training a ReLU network = fitting a tropical polynomial
+- Network width = number of monomials
+- Network depth = degree of the polynomial
+- **Sound design = network architecture design**
 
-## Morphing Between Patches
-
-Edges of the Newton polytope define natural morphing paths:
+## Quick Start
 
 ```rust
-use tropical_synth::MorphPath;
+use tropical_synth::{
+    TropicalPolynomial, TropicalMonomial, TimbreSpace, MorphPath
+};
 
-// Morph between two patches over 128 steps (MIDI resolution)
-let morph = MorphPath::new(&patch_a, &patch_b, 128);
-for i in 0..128 {
-    let interpolated = morph.at(i);
-    // Send to synthesizer
-}
+// Define a tropical polynomial (3 patches in 2D parameter space)
+let poly = TropicalPolynomial::new(vec![
+    TropicalMonomial::new(0.0, vec![2, 0]),
+    TropicalMonomial::new(0.0, vec![0, 2]),
+    TropicalMonomial::new(3.0, vec![1, 1]),
+]);
+
+// Build the timbre space
+let space = TimbreSpace::new(poly).unwrap();
+println!("{} patches", space.len());
+
+// Get the active patch at a parameter point
+let patch = space.active_patch(&[5.0, 0.0]).unwrap();
+println!("Filter cutoff: {:.0} Hz", patch.filter.cutoff_hz);
+
+// Morph between two patches
+let mut morph = space.morph(0, 1).unwrap();
+morph.set_t(0.5).unwrap();
+let mid = morph.current_patch();
+println!("Midpoint cutoff: {:.0} Hz", mid.filter.cutoff_hz);
 ```
 
-The morphing is linear in tropical space, which means it respects the piecewise-linear geometry — you never pass through a parameter combination that isn't "on the surface."
+## SynthPatch: Vertex → Sound
 
-## MIDI Integration
+Each vertex of the Newton polytope maps to a full synth patch:
 
 ```rust
-use tropical_synth::MidiCCMapper;
+use tropical_synth::SynthPatch;
 
-let mapper = MidiCCMapper::new();
-let cc_messages = mapper.patch_to_cc(&patch);
-for (cc, value) in cc_messages {
-    // Send MIDI CC message on your DAW/controller
-}
+// From a tropical vertex (exponents, coefficient)
+let patch = SynthPatch::from_vertex(&[2, 1], 1.5);
+// - Exponent sum → number of oscillators (1-3)
+// - First exponent → waveform (saw, square, triangle, sine, noise)
+// - Coefficient → filter cutoff (logarithmic)
+// - Second exponent → envelope attack
+
+println!("Oscillators: {}", patch.oscillators.len());
+println!("Waveform: {:?}", patch.oscillators[0].waveform);
+println!("Cutoff: {:.0} Hz", patch.filter.cutoff_hz);
+println!("Attack: {:.3}s", patch.envelope.attack_s);
 ```
 
-## Module Map
+## MIDI CC Mapping
 
-| Module | What it does |
-|---|---|
-| `semiring` | `Tropical<T>` — the max-plus arithmetic. `a ⊕ b = max(a,b)`, `a ⊗ b = a+b` |
-| `polynomial` | `TropicalMonomial`, `TropicalPolynomial`, `NewtonPolytope` — build and evaluate tropical surfaces |
-| `patch` | `SynthPatch` + oscillator/filter/envelope/effects parameters |
-| `morph` | `MorphPath` — interpolate between patches along polytope edges |
-| `timbre` | `TimbreSpace` — the full navigable sound-design surface |
-| `midi` | `MidiCCMapper` — convert patches to MIDI CC messages |
+Any patch can be converted to standard MIDI CC messages:
 
-## Prior Art
+```rust
+use tropical_synth::{SynthPatch, MidiCCMapper};
 
-The connection between tropical geometry and sound design was explored by Sancristoforo (2018) in Max/MSP, but this is the first general-purpose library implementation. The tropical-ReLU equivalence is due to Zhang et al. (2018).
+let mapper = MidiCCMapper::new(0); // channel 0
+let patch = SynthPatch::simple();
+let messages = mapper.map_patch(&patch).unwrap();
 
-## Links
+for msg in &messages {
+    println!("CC{} = {} (ch{})", msg.cc, msg.value, msg.channel);
+}
+// Output: CC7 (volume), CC74 (brightness), CC73 (attack), CC72 (release), etc.
+```
 
-- [Documentation](https://docs.rs/tropical-synth)
-- [Repository](https://github.com/SuperInstance/tropical-synth)
-- [crates.io](https://crates.io/crates/tropical-synth)
+Standard CC mappings:
+| Parameter | CC Number |
+|-----------|-----------|
+| Volume | 7 |
+| Brightness (filter cutoff) | 74 |
+| Filter resonance | 71 |
+| Attack | 73 |
+| Release | 72 |
+| Decay | 75 |
+| Sustain | 70 |
+| Reverb | 91 |
+| Chorus | 93 |
+| Detune | 94 |
+
+## Performance
+
+- **Tropical evaluation**: O(n) where n = number of monomials
+- **Active monomial**: O(n) linear scan
+- **Grid classification**: O(resolution^d) where d = dimensionality
+- **Patch morphing**: O(1) — linear interpolation of numeric fields
+- **MIDI mapping**: O(1) per patch
+
+All operations are real-time safe — no allocation in the hot path.
+
+## Comparison
+
+| Feature | tropical-synth | Traditional synths | Neural audio |
+|---------|---------------|-------------------|-------------|
+| Patch structure | Tropical vertices | Knob positions | Network weights |
+| Morphing | Tropical edge interpolation | Crossfade | Latent interpolation |
+| Space structure | Newton polytope | Unstructured | Latent space |
+| Mathematical foundation | Tropical geometry / ReLU networks | None | Deep learning |
+| MIDI output | ✅ Built-in | ✅ Native | ❌ |
+| Patch from math | ✅ from_vertex() | ❌ | ❌ |
+
+## SuperInstance Ecosystem
+
+`tropical-synth` integrates with:
+- `lotka-beats` — species timbre profiles use tropical patches
+- `groovemesh-plr` — PLR transitions mapped to tropical morph paths
+- `spreadsheet-engine` — tropical polynomials as formula cell inputs
+- `noether-guard` — conservation checking for energy-like tropical quantities
 
 ## License
 
